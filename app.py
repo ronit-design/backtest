@@ -227,17 +227,19 @@ capital     = st.number_input("Starting capital ($)", value=10_000, step=1_000)
 left, right = st.columns(2)
 with left:
     st.markdown("**Buy conditions** (all must be true)")
-    n_buy    = st.number_input("# buy conditions", 1, 5, 1, key="n_buy")
-    buy_conds = [condition_row(f"buy_{i}", numeric_cols)
-                 for i in range(int(n_buy))
-                 if not st.caption(f"Buy condition {i+1}")]
+    n_buy = st.number_input("# buy conditions", 1, 5, 1, key="n_buy")
+    buy_conds = []
+    for i in range(int(n_buy)):
+        st.caption(f"Buy condition {i+1}")
+        buy_conds.append(condition_row(f"buy_{i}", numeric_cols))
 
 with right:
     st.markdown("**Sell conditions** (all must be true)")
-    n_sell    = st.number_input("# sell conditions", 1, 5, 1, key="n_sell")
-    sell_conds = [condition_row(f"sell_{i}", numeric_cols)
-                  for i in range(int(n_sell))
-                  if not st.caption(f"Sell condition {i+1}")]
+    n_sell = st.number_input("# sell conditions", 1, 5, 1, key="n_sell")
+    sell_conds = []
+    for i in range(int(n_sell)):
+        st.caption(f"Sell condition {i+1}")
+        sell_conds.append(condition_row(f"sell_{i}", numeric_cols))
 
 run = st.button("Run Backtest", type="primary", use_container_width=True)
 if not run:
