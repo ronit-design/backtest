@@ -7,8 +7,8 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title="Backtester", layout="wide")
 
 NUMERIC_OPS = [">", "<", ">=", "<=", "=="]
-CROSS_OPS = ["crosses above", "crosses below"]
-ALL_OPS = NUMERIC_OPS + CROSS_OPS
+CROSS_OPS   = ["crosses above", "crosses below"]
+ALL_OPS     = NUMERIC_OPS + CROSS_OPS
 
 FREQ_MAP = {"Daily": 252, "Weekly": 52, "Monthly": 12, "Quarterly": 4}
 
@@ -16,11 +16,11 @@ FREQ_MAP = {"Daily": 252, "Weekly": 52, "Monthly": 12, "Quarterly": 4}
 
 def evaluate_condition(df, col, op, val):
     s = df[col]
-    if op == ">":            return s > val
-    if op == "<":            return s < val
-    if op == ">=":           return s >= val
-    if op == "<=":           return s <= val
-    if op == "==":           return s == val
+    if op == ">":             return s > val
+    if op == "<":             return s < val
+    if op == ">=":            return s >= val
+    if op == "<=":            return s <= val
+    if op == "==":            return s == val
     if op == "crosses above": return (s > val) & (s.shift(1) <= val)
     if op == "crosses below": return (s < val) & (s.shift(1) >= val)
     return pd.Series(False, index=df.index)
@@ -40,31 +40,30 @@ def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000):
     sell_sig = build_signal(df, sell_conds)
 
     position = [0] * len(df)
-    in_pos = False
-    trades = []  # (entry_idx, exit_idx)
-    entry_i = None
+    in_pos   = False
+    trades   = []   # (entry_bar_idx, exit_bar_idx)
+    entry_i  = None
 
     for i in range(len(df)):
         if not in_pos and buy_sig.iloc[i]:
-            in_pos = True
+            in_pos  = True
             entry_i = i
         elif in_pos and sell_sig.iloc[i]:
-            in_pos = False
+            in_pos  = False
             trades.append((entry_i, i))
             entry_i = None
         position[i] = 1 if in_pos else 0
 
-    if in_pos and entry_i is not None:
+    if in_pos and entry_i is not None:          # open trade at end of data
         trades.append((entry_i, len(df) - 1))
 
     pos_series = pd.Series(position, index=df.index)
     price_ret  = df["close"].pct_change().fillna(0)
 
-    # shift(1): signal seen at bar close, fills next bar
-    strat_ret  = pos_series.shift(1).fillna(0) * price_ret
-
-    strat_eq   = initial_capital * (1 + strat_ret).cumprod()
-    bh_eq      = initial_capital * (1 + price_ret).cumprod()
+    # signal seen at bar close → fills at next bar's open, approximated as next close
+    strat_ret = pos_series.shift(1).fillna(0) * price_ret
+    strat_eq  = initial_capital * (1 + strat_ret).cumprod()
+    bh_eq     = initial_capital * (1 + price_ret).cumprod()
 
     return {
         "strat_ret":  strat_ret,
@@ -78,45 +77,87 @@ def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000):
     }
 
 
-def calc_metrics(ret, equity, ppy):
+def calc_metrics(ret: pd.Series, equity: pd.Series, ppy: int, n_active: int | None = None) -> dict:
+    """
+    ret       – return series (pass only active/invested bars for the strategy)
+    equity    – full equity curve (for total return and drawdown)
+    ppy       – periods per year for the chosen frequency
+    n_active  – bars actually invested; if None uses len(ret)
+    """
     total_ret = equity.iloc[-1] / equity.iloc[0] - 1
-    n = len(ret)
-    ann_ret  = (1 + total_ret) ** (ppy / n) - 1
-    ann_vol  = ret.std() * np.sqrt(ppy)
-    sharpe   = ann_ret / ann_vol if ann_vol > 0 else np.nan
-    roll_max = equity.cummax()
-    max_dd   = ((equity - roll_max) / roll_max).min()
+    n         = n_active if (n_active and n_active > 0) else len(ret)
+    ann_ret   = (1 + total_ret) ** (ppy / n) - 1
+    ann_vol   = ret.std() * np.sqrt(ppy)
+    sharpe    = ann_ret / ann_vol if ann_vol > 0 else np.nan
+    roll_max  = equity.cummax()
+    max_dd    = ((equity - roll_max) / roll_max).min()
     return {
-        "Total Return":     total_ret,
-        "Ann. Return":      ann_ret,
-        "Ann. Volatility":  ann_vol,
-        "Sharpe Ratio":     sharpe,
-        "Max Drawdown":     max_dd,
+        "Total Return":    total_ret,
+        "Ann. Return":     ann_ret,
+        "Ann. Volatility": ann_vol,
+        "Sharpe Ratio":    sharpe,
+        "Max Drawdown":    max_dd,
+    }
+
+
+def build_trade_records(df, trades, ppy) -> list[dict]:
+    idx   = df.index
+    close = df["close"]
+    rows  = []
+    for entry_i, exit_i in trades:
+        ep    = close.iloc[entry_i]
+        xp    = close.iloc[exit_i]
+        ret   = xp / ep - 1
+        bars  = exit_i - entry_i
+        # annualise per-trade return by bars held
+        ann   = (1 + ret) ** (ppy / bars) - 1 if bars > 0 else np.nan
+        rows.append({
+            "Entry date":       idx[entry_i].date(),
+            "Exit date":        idx[exit_i].date(),
+            "Bars held":        bars,
+            "Entry price":      round(ep, 4),
+            "Exit price":       round(xp, 4),
+            "Return":           ret,
+            "Ann. return":      ann,
+            "Win":              ret > 0,
+        })
+    return rows
+
+
+def trade_stats(records: list[dict]) -> dict | None:
+    if not records:
+        return None
+    rets  = np.array([r["Return"] for r in records])
+    rounded = np.round(rets * 100).astype(int)
+    mode_val = pd.Series(rounded).value_counts().index[0] / 100
+    return {
+        "n":       len(rets),
+        "wins":    int(sum(r["Win"] for r in records)),
+        "mean":    rets.mean(),
+        "median":  float(np.median(rets)),
+        "mode":    mode_val,
+        "min":     rets.min(),
+        "max":     rets.max(),
     }
 
 
 def forward_return_stats(df, signal: pd.Series, periods: int) -> dict | None:
-    """Cumulative forward return over `periods` bars after each signal fire."""
-    close = df["close"]
-    signal_indices = np.where(signal.values)[0]
-    fwd_rets = []
-    for i in signal_indices:
-        end = i + periods
-        if end >= len(close):
-            end = len(close) - 1
+    close     = df["close"]
+    sig_idx   = np.where(signal.values)[0]
+    fwd_rets  = []
+    for i in sig_idx:
+        end = min(i + periods, len(close) - 1)
         if end > i:
             fwd_rets.append(close.iloc[end] / close.iloc[i] - 1)
     if not fwd_rets:
         return None
-    arr = np.array(fwd_rets)
-    # mode: bucket to nearest 1%
-    rounded = np.round(arr * 100).astype(int)
-    counts  = pd.Series(rounded).value_counts()
-    mode_val = counts.index[0] / 100
+    arr      = np.array(fwd_rets)
+    rounded  = np.round(arr * 100).astype(int)
+    mode_val = pd.Series(rounded).value_counts().index[0] / 100
     return {
         "n_signals": len(arr),
         "mean":      arr.mean(),
-        "median":    np.median(arr),
+        "median":    float(np.median(arr)),
         "mode":      mode_val,
         "min":       arr.min(),
     }
@@ -124,33 +165,31 @@ def forward_return_stats(df, signal: pd.Series, periods: int) -> dict | None:
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 
-def condition_row(key_prefix, numeric_cols, label):
+def condition_row(key_prefix, numeric_cols):
     cols = st.columns([2, 1.5, 1.5])
-    col  = cols[0].selectbox("Column",   numeric_cols,  key=f"{key_prefix}_col",   label_visibility="collapsed")
-    op   = cols[1].selectbox("Operator", ALL_OPS,       key=f"{key_prefix}_op",    label_visibility="collapsed")
-    val  = cols[2].number_input("Value", value=0.0,     key=f"{key_prefix}_val",   label_visibility="collapsed",
+    col  = cols[0].selectbox("Column",   numeric_cols, key=f"{key_prefix}_col", label_visibility="collapsed")
+    op   = cols[1].selectbox("Operator", ALL_OPS,      key=f"{key_prefix}_op",  label_visibility="collapsed")
+    val  = cols[2].number_input("Value", value=0.0,    key=f"{key_prefix}_val", label_visibility="collapsed",
                                 format="%.4f", step=0.01)
     return {"col": col, "op": op, "val": val}
 
 
-def format_pct(v):  return f"{v:.2%}"
-def format_f2(v):   return f"{v:.2f}" if not np.isnan(v) else "—"
+def fmt_pct(v):  return f"{v:.2%}"
+def fmt_f2(v):   return f"{v:.2f}" if not np.isnan(v) else "—"
 
 
-# ── main app ──────────────────────────────────────────────────────────────────
+# ── app ───────────────────────────────────────────────────────────────────────
 
 st.title("Strategy Backtester")
 st.caption("Upload your OHLCV + indicator CSV, define buy/sell rules, compare vs buy & hold.")
 
-# ── Step 1: upload ────────────────────────────────────────────────────────────
+# ── upload ────────────────────────────────────────────────────────────────────
 uploaded = st.file_uploader("Upload CSV", type="csv")
 if not uploaded:
-    st.info("Upload a CSV with columns: time, open, high, low, close, Volume, ROC, 2nd Derivative (Acceleration)")
+    st.info("Expected columns: time, open, high, low, close, Volume, ROC, 2nd Derivative (Acceleration)")
     st.stop()
 
 df_raw = pd.read_csv(uploaded)
-
-# normalise column names
 df_raw.columns = df_raw.columns.str.strip()
 
 required = {"time", "open", "high", "low", "close"}
@@ -159,16 +198,14 @@ if missing:
     st.error(f"Missing required columns: {missing}")
     st.stop()
 
-df_raw.columns = [c if c.lower() not in {"time","open","high","low","close","volume"}
-                  else c.lower() for c in df_raw.columns]
+df_raw.columns = [c.lower() if c.lower() in {"time","open","high","low","close","volume"} else c
+                  for c in df_raw.columns]
 
 df_raw["time"] = pd.to_datetime(df_raw["time"])
-df_raw = df_raw.sort_values("time").reset_index(drop=True)
-df_raw = df_raw.set_index("time")
+df_raw = df_raw.sort_values("time").reset_index(drop=True).set_index("time")
 
 if "volume" in df_raw.columns:
-    roll_avg = df_raw["volume"].rolling(12, min_periods=1).mean()
-    df_raw["Vol / 12M Avg"] = df_raw["volume"] / roll_avg
+    df_raw["Vol / 12M Avg"] = df_raw["volume"] / df_raw["volume"].rolling(12, min_periods=1).mean()
 
 numeric_cols = df_raw.select_dtypes(include=[np.number]).columns.tolist()
 
@@ -177,46 +214,51 @@ with st.expander("Data preview", expanded=False):
 
 st.divider()
 
-# ── Step 2: strategy builder ─────────────────────────────────────────────────
+# ── strategy builder ──────────────────────────────────────────────────────────
 st.subheader("Strategy Rules")
 
 freq_choice = st.selectbox("Data frequency (for annualisation)", list(FREQ_MAP.keys()), index=2)
-ppy = FREQ_MAP[freq_choice]
-capital = st.number_input("Starting capital ($)", value=10_000, step=1_000)
+ppy         = FREQ_MAP[freq_choice]
+capital     = st.number_input("Starting capital ($)", value=10_000, step=1_000)
 
 left, right = st.columns(2)
-
 with left:
     st.markdown("**Buy conditions** (all must be true)")
-    n_buy = st.number_input("# buy conditions", 1, 5, 1, key="n_buy")
-    buy_conds = []
-    for i in range(int(n_buy)):
-        st.caption(f"Buy condition {i+1}")
-        buy_conds.append(condition_row(f"buy_{i}", numeric_cols, f"Buy {i+1}"))
+    n_buy    = st.number_input("# buy conditions", 1, 5, 1, key="n_buy")
+    buy_conds = [condition_row(f"buy_{i}", numeric_cols)
+                 for i in range(int(n_buy))
+                 if not st.caption(f"Buy condition {i+1}")]
 
 with right:
     st.markdown("**Sell conditions** (all must be true)")
-    n_sell = st.number_input("# sell conditions", 1, 5, 1, key="n_sell")
-    sell_conds = []
-    for i in range(int(n_sell)):
-        st.caption(f"Sell condition {i+1}")
-        sell_conds.append(condition_row(f"sell_{i}", numeric_cols, f"Sell {i+1}"))
+    n_sell    = st.number_input("# sell conditions", 1, 5, 1, key="n_sell")
+    sell_conds = [condition_row(f"sell_{i}", numeric_cols)
+                  for i in range(int(n_sell))
+                  if not st.caption(f"Sell condition {i+1}")]
 
 run = st.button("Run Backtest", type="primary", use_container_width=True)
 if not run:
     st.stop()
 
-# ── Step 3: run & display ─────────────────────────────────────────────────────
-with st.spinner("Running backtest…"):
+# ── run ───────────────────────────────────────────────────────────────────────
+with st.spinner("Running…"):
     res = run_backtest(df_raw, buy_conds, sell_conds, initial_capital=capital)
 
-strat_metrics = calc_metrics(res["strat_ret"],  res["strat_eq"],  ppy)
-bh_metrics    = calc_metrics(res["bh_ret"],     res["bh_eq"],     ppy)
-n_trades      = len(res["trades"])
-time_in_mkt   = res["position"].mean()
+# invested bars (shift(1) matches how strat_ret is built)
+invested_mask = res["position"].shift(1).fillna(0).astype(bool)
+n_invested    = int(invested_mask.sum())
+active_ret    = res["strat_ret"][invested_mask]   # returns only while in position
 
-# ── metrics table ─────────────────────────────────────────────────────────────
+strat_metrics = calc_metrics(active_ret, res["strat_eq"], ppy, n_active=n_invested)
+bh_metrics    = calc_metrics(res["bh_ret"], res["bh_eq"], ppy)
+
+records    = build_trade_records(df_raw, res["trades"], ppy)
+tstats     = trade_stats(records)
+time_in_mkt = res["position"].mean()
+
+# ── performance summary ───────────────────────────────────────────────────────
 st.subheader("Performance Summary")
+st.caption("Strategy annualised over time actually invested; Buy & Hold annualised over the full period.")
 
 metric_cols = st.columns(5)
 labels = ["Total Return", "Ann. Return", "Ann. Volatility", "Sharpe Ratio", "Max Drawdown"]
@@ -224,67 +266,122 @@ for col_ui, label in zip(metric_cols, labels):
     sv = strat_metrics[label]
     bv = bh_metrics[label]
     if label == "Sharpe Ratio":
-        sv_str, bv_str = format_f2(sv), format_f2(bv)
+        sv_str, bv_str = fmt_f2(sv), fmt_f2(bv)
         delta = f"{sv - bv:+.2f} vs B&H" if not np.isnan(sv) and not np.isnan(bv) else ""
     else:
-        sv_str, bv_str = format_pct(sv), format_pct(bv)
+        sv_str, bv_str = fmt_pct(sv), fmt_pct(bv)
         delta = f"{sv - bv:+.2%} vs B&H"
     col_ui.metric(label, sv_str, delta, help=f"Buy & Hold: {bv_str}")
 
-extra = st.columns(2)
-extra[0].metric("# Trades", n_trades)
-extra[1].metric("Time in Market", format_pct(time_in_mkt))
+extra = st.columns(3)
+extra[0].metric("# Trades", len(records))
+extra[1].metric("Time in Market", fmt_pct(time_in_mkt))
+extra[2].metric("Bars Invested", f"{n_invested} / {len(df_raw)}")
 
 st.divider()
 
 # ── equity curve ──────────────────────────────────────────────────────────────
 st.subheader("Equity Curve")
 
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                    row_heights=[0.7, 0.3],
-                    subplot_titles=("Equity", "Position (1=invested, 0=cash)"))
-
+fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28],
+                    subplot_titles=("Equity ($)", "Invested (1 = in position)"))
 fig.add_trace(go.Scatter(x=res["strat_eq"].index, y=res["strat_eq"],
                          name="Strategy", line=dict(color="#2563eb", width=2)), row=1, col=1)
-fig.add_trace(go.Scatter(x=res["bh_eq"].index,    y=res["bh_eq"],
+fig.add_trace(go.Scatter(x=res["bh_eq"].index, y=res["bh_eq"],
                          name="Buy & Hold", line=dict(color="#9ca3af", width=1.5, dash="dot")), row=1, col=1)
-
 fig.add_trace(go.Scatter(x=res["position"].index, y=res["position"],
                          fill="tozeroy", name="In market",
                          line=dict(color="#10b981", width=1),
                          fillcolor="rgba(16,185,129,0.15)"), row=2, col=1)
-
-fig.update_layout(height=550, legend=dict(orientation="h", y=1.02),
+fig.update_layout(height=540, legend=dict(orientation="h", y=1.02),
                   margin=dict(l=0, r=0, t=30, b=0))
 fig.update_yaxes(title_text="$", row=1, col=1)
 st.plotly_chart(fig, use_container_width=True)
 
-# ── drawdown chart ────────────────────────────────────────────────────────────
+# ── drawdown ──────────────────────────────────────────────────────────────────
 st.subheader("Drawdown")
-
 strat_dd = (res["strat_eq"] - res["strat_eq"].cummax()) / res["strat_eq"].cummax()
 bh_dd    = (res["bh_eq"]   - res["bh_eq"].cummax())   / res["bh_eq"].cummax()
 
 fig2 = go.Figure()
-fig2.add_trace(go.Scatter(x=strat_dd.index, y=strat_dd,
-                          fill="tozeroy", name="Strategy",
+fig2.add_trace(go.Scatter(x=strat_dd.index, y=strat_dd, fill="tozeroy", name="Strategy",
                           line=dict(color="#ef4444"), fillcolor="rgba(239,68,68,0.2)"))
-fig2.add_trace(go.Scatter(x=bh_dd.index, y=bh_dd,
-                          name="Buy & Hold", line=dict(color="#9ca3af", dash="dot")))
-fig2.update_layout(height=280, yaxis_tickformat=".0%",
+fig2.add_trace(go.Scatter(x=bh_dd.index, y=bh_dd, name="Buy & Hold",
+                          line=dict(color="#9ca3af", dash="dot")))
+fig2.update_layout(height=260, yaxis_tickformat=".0%",
                    legend=dict(orientation="h"), margin=dict(l=0, r=0, t=10, b=0))
 st.plotly_chart(fig2, use_container_width=True)
 
+st.divider()
+
+# ── per-trade statistics ──────────────────────────────────────────────────────
+st.subheader("Trade Statistics")
+
+if tstats is None:
+    st.info("No completed trades.")
+else:
+    win_rate = tstats["wins"] / tstats["n"]
+    tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+    tc1.metric("Trades",    tstats["n"])
+    tc2.metric("Win rate",  fmt_pct(win_rate))
+    tc3.metric("Avg return", fmt_pct(tstats["mean"]))
+    tc4.metric("Median return", fmt_pct(tstats["median"]))
+    tc5.metric("Worst trade",  fmt_pct(tstats["min"]))
+
+    ts_left, ts_right = st.columns(2)
+    with ts_left:
+        stat_rows = [
+            ("Mean return",    fmt_pct(tstats["mean"])),
+            ("Median return",  fmt_pct(tstats["median"])),
+            ("Mode return",    fmt_pct(tstats["mode"])),
+            ("Best trade",     fmt_pct(tstats["max"])),
+            ("Worst trade",    fmt_pct(tstats["min"])),
+        ]
+        st.table(pd.DataFrame(stat_rows, columns=["Metric", "Value"]).set_index("Metric"))
+
+    with ts_right:
+        trade_rets = [r["Return"] * 100 for r in records]
+        fig_h = go.Figure(go.Histogram(x=trade_rets, nbinsx=20,
+                                       marker_color="#2563eb", opacity=0.75))
+        fig_h.add_vline(x=tstats["mean"] * 100, line_dash="dash", line_color="#ef4444",
+                        annotation_text="mean", annotation_position="top right")
+        fig_h.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0),
+                            xaxis_title="Return per trade (%)", yaxis_title="Count")
+        st.plotly_chart(fig_h, use_container_width=True)
+
+st.divider()
+
+# ── trade log ─────────────────────────────────────────────────────────────────
+st.subheader("Trade Log")
+if not records:
+    st.info("No trades executed.")
+else:
+    display_rows = []
+    for r in records:
+        display_rows.append({
+            "Entry date":    r["Entry date"],
+            "Exit date":     r["Exit date"],
+            "Bars held":     r["Bars held"],
+            "Entry price":   r["Entry price"],
+            "Exit price":    r["Exit price"],
+            "Return":        fmt_pct(r["Return"]),
+            "Ann. return":   fmt_pct(r["Ann. return"]) if not np.isnan(r["Ann. return"]) else "—",
+            "Win":           "✓" if r["Win"] else "✗",
+        })
+    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+st.divider()
+
 # ── forward return analysis ───────────────────────────────────────────────────
 st.subheader("Forward Return Analysis (12 periods after signal)")
-st.caption("For every bar where the buy or sell condition fired, what did the asset return over the next 12 periods?")
+st.caption("Every time the buy or sell condition fires — including signals that don't open/close a trade — what did the asset return over the next 12 periods?")
 
 fwd_buy  = forward_return_stats(df_raw, res["buy_sig"],  ppy)
 fwd_sell = forward_return_stats(df_raw, res["sell_sig"], ppy)
 
 fwd_left, fwd_right = st.columns(2)
 
-def render_fwd_table(stats, signal_series, label, color, container):
+def render_fwd(stats, signal_series, label, color, container):
     with container:
         st.markdown(f"**After {label} signal**")
         if stats is None:
@@ -292,54 +389,25 @@ def render_fwd_table(stats, signal_series, label, color, container):
             return
         rows = [
             ("Signals fired",  stats["n_signals"]),
-            ("Mean return",    format_pct(stats["mean"])),
-            ("Median return",  format_pct(stats["median"])),
-            ("Mode return",    format_pct(stats["mode"])),
-            ("Lowest return",  format_pct(stats["min"])),
+            ("Mean return",    fmt_pct(stats["mean"])),
+            ("Median return",  fmt_pct(stats["median"])),
+            ("Mode return",    fmt_pct(stats["mode"])),
+            ("Lowest return",  fmt_pct(stats["min"])),
         ]
         st.table(pd.DataFrame(rows, columns=["Metric", "Value"]).set_index("Metric"))
-
-        close = df_raw["close"]
+        close   = df_raw["close"]
         sig_idx = np.where(signal_series.values)[0]
-        rets = []
+        rets    = []
         for i in sig_idx:
             end = min(i + ppy, len(close) - 1)
             if end > i:
                 rets.append(close.iloc[end] / close.iloc[i] - 1)
         if rets:
-            fig_h = go.Figure(go.Histogram(
-                x=[r * 100 for r in rets],
-                nbinsx=20,
-                marker_color=color,
-                opacity=0.75,
-            ))
-            fig_h.update_layout(
-                height=220, margin=dict(l=0, r=0, t=10, b=0),
-                xaxis_title="12-period forward return (%)", yaxis_title="Count",
-            )
+            fig_h = go.Figure(go.Histogram(x=[r * 100 for r in rets], nbinsx=20,
+                                           marker_color=color, opacity=0.75))
+            fig_h.update_layout(height=210, margin=dict(l=0, r=0, t=10, b=0),
+                                xaxis_title="12-period forward return (%)", yaxis_title="Count")
             st.plotly_chart(fig_h, use_container_width=True)
 
-render_fwd_table(fwd_buy,  res["buy_sig"],  "Buy",  "#2563eb", fwd_left)
-render_fwd_table(fwd_sell, res["sell_sig"], "Sell", "#ef4444", fwd_right)
-
-st.divider()
-
-# ── trades log ────────────────────────────────────────────────────────────────
-if res["trades"] and st.checkbox("Show trade log"):
-    rows = []
-    idx = df_raw.index
-    for entry_i, exit_i in res["trades"]:
-        entry_price = df_raw["close"].iloc[entry_i]
-        exit_price  = df_raw["close"].iloc[exit_i]
-        ret = exit_price / entry_price - 1
-        rows.append({
-            "Entry date":  idx[entry_i].date(),
-            "Exit date":   idx[exit_i].date(),
-            "Entry price": round(entry_price, 4),
-            "Exit price":  round(exit_price, 4),
-            "Return":      f"{ret:.2%}",
-        })
-    trade_df = pd.DataFrame(rows)
-    wins = sum(1 for r in rows if float(r["Return"].strip("%")) > 0)
-    st.dataframe(trade_df, use_container_width=True)
-    st.caption(f"Win rate: {wins}/{len(rows)} = {wins/len(rows):.0%}")
+render_fwd(fwd_buy,  res["buy_sig"],  "Buy",  "#2563eb", fwd_left)
+render_fwd(fwd_sell, res["sell_sig"], "Sell", "#ef4444", fwd_right)
