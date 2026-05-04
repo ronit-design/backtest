@@ -205,7 +205,7 @@ df_raw["time"] = pd.to_datetime(df_raw["time"])
 df_raw = df_raw.sort_values("time").reset_index(drop=True).set_index("time")
 
 if "volume" in df_raw.columns:
-    df_raw["Vol / 12M Avg"] = df_raw["volume"] / df_raw["volume"].rolling(12, min_periods=1).mean()
+    df_raw["Vol / 24M Avg"] = df_raw["volume"] / df_raw["volume"].rolling(24, min_periods=1).mean()
 
 numeric_cols = df_raw.select_dtypes(include=[np.number]).columns.tolist()
 
