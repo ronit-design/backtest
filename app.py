@@ -86,6 +86,9 @@ def calc_metrics(ret: pd.Series, equity: pd.Series, ppy: int, n_active: int | No
     """
     total_ret = equity.iloc[-1] / equity.iloc[0] - 1
     n         = n_active if (n_active and n_active > 0) else len(ret)
+    if n == 0:
+        return {"Total Return": total_ret, "Ann. Return": np.nan,
+                "Ann. Volatility": np.nan, "Sharpe Ratio": np.nan, "Max Drawdown": np.nan}
     ann_ret   = (1 + total_ret) ** (ppy / n) - 1
     ann_vol   = ret.std() * np.sqrt(ppy)
     sharpe    = ann_ret / ann_vol if ann_vol > 0 else np.nan
@@ -269,8 +272,9 @@ for col_ui, label in zip(metric_cols, labels):
         sv_str, bv_str = fmt_f2(sv), fmt_f2(bv)
         delta = f"{sv - bv:+.2f} vs B&H" if not np.isnan(sv) and not np.isnan(bv) else ""
     else:
-        sv_str, bv_str = fmt_pct(sv), fmt_pct(bv)
-        delta = f"{sv - bv:+.2%} vs B&H"
+        sv_str = fmt_pct(sv) if not np.isnan(sv) else "—"
+        bv_str = fmt_pct(bv) if not np.isnan(bv) else "—"
+        delta  = f"{sv - bv:+.2%} vs B&H" if not np.isnan(sv) and not np.isnan(bv) else ""
     col_ui.metric(label, sv_str, delta, help=f"Buy & Hold: {bv_str}")
 
 extra = st.columns(3)
