@@ -73,6 +73,8 @@ def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000):
         "bh_eq":      bh_eq,
         "position":   pos_series,
         "trades":     trades,
+        "buy_sig":    buy_sig,
+        "sell_sig":   sell_sig,
     }
 
 
@@ -90,6 +92,33 @@ def calc_metrics(ret, equity, ppy):
         "Ann. Volatility":  ann_vol,
         "Sharpe Ratio":     sharpe,
         "Max Drawdown":     max_dd,
+    }
+
+
+def forward_return_stats(df, signal: pd.Series, periods: int) -> dict | None:
+    """Cumulative forward return over `periods` bars after each signal fire."""
+    close = df["close"]
+    signal_indices = np.where(signal.values)[0]
+    fwd_rets = []
+    for i in signal_indices:
+        end = i + periods
+        if end >= len(close):
+            end = len(close) - 1
+        if end > i:
+            fwd_rets.append(close.iloc[end] / close.iloc[i] - 1)
+    if not fwd_rets:
+        return None
+    arr = np.array(fwd_rets)
+    # mode: bucket to nearest 1%
+    rounded = np.round(arr * 100).astype(int)
+    counts  = pd.Series(rounded).value_counts()
+    mode_val = counts.index[0] / 100
+    return {
+        "n_signals": len(arr),
+        "mean":      arr.mean(),
+        "median":    np.median(arr),
+        "mode":      mode_val,
+        "min":       arr.min(),
     }
 
 
@@ -136,6 +165,10 @@ df_raw.columns = [c if c.lower() not in {"time","open","high","low","close","vol
 df_raw["time"] = pd.to_datetime(df_raw["time"])
 df_raw = df_raw.sort_values("time").reset_index(drop=True)
 df_raw = df_raw.set_index("time")
+
+if "volume" in df_raw.columns:
+    roll_avg = df_raw["volume"].rolling(12, min_periods=1).mean()
+    df_raw["Vol / 12M Avg"] = df_raw["volume"] / roll_avg
 
 numeric_cols = df_raw.select_dtypes(include=[np.number]).columns.tolist()
 
@@ -241,6 +274,55 @@ fig2.add_trace(go.Scatter(x=bh_dd.index, y=bh_dd,
 fig2.update_layout(height=280, yaxis_tickformat=".0%",
                    legend=dict(orientation="h"), margin=dict(l=0, r=0, t=10, b=0))
 st.plotly_chart(fig2, use_container_width=True)
+
+# ── forward return analysis ───────────────────────────────────────────────────
+st.subheader("Forward Return Analysis (12 periods after signal)")
+st.caption("For every bar where the buy or sell condition fired, what did the asset return over the next 12 periods?")
+
+fwd_buy  = forward_return_stats(df_raw, res["buy_sig"],  ppy)
+fwd_sell = forward_return_stats(df_raw, res["sell_sig"], ppy)
+
+fwd_left, fwd_right = st.columns(2)
+
+def render_fwd_table(stats, signal_series, label, color, container):
+    with container:
+        st.markdown(f"**After {label} signal**")
+        if stats is None:
+            st.info("No signals fired.")
+            return
+        rows = [
+            ("Signals fired",  stats["n_signals"]),
+            ("Mean return",    format_pct(stats["mean"])),
+            ("Median return",  format_pct(stats["median"])),
+            ("Mode return",    format_pct(stats["mode"])),
+            ("Lowest return",  format_pct(stats["min"])),
+        ]
+        st.table(pd.DataFrame(rows, columns=["Metric", "Value"]).set_index("Metric"))
+
+        close = df_raw["close"]
+        sig_idx = np.where(signal_series.values)[0]
+        rets = []
+        for i in sig_idx:
+            end = min(i + ppy, len(close) - 1)
+            if end > i:
+                rets.append(close.iloc[end] / close.iloc[i] - 1)
+        if rets:
+            fig_h = go.Figure(go.Histogram(
+                x=[r * 100 for r in rets],
+                nbinsx=20,
+                marker_color=color,
+                opacity=0.75,
+            ))
+            fig_h.update_layout(
+                height=220, margin=dict(l=0, r=0, t=10, b=0),
+                xaxis_title="12-period forward return (%)", yaxis_title="Count",
+            )
+            st.plotly_chart(fig_h, use_container_width=True)
+
+render_fwd_table(fwd_buy,  res["buy_sig"],  "Buy",  "#2563eb", fwd_left)
+render_fwd_table(fwd_sell, res["sell_sig"], "Sell", "#ef4444", fwd_right)
+
+st.divider()
 
 # ── trades log ────────────────────────────────────────────────────────────────
 if res["trades"] and st.checkbox("Show trade log"):
