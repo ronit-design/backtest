@@ -154,14 +154,12 @@ def forward_return_stats(df, signal: pd.Series, periods: int) -> dict | None:
             fwd_rets.append(close.iloc[end] / close.iloc[i] - 1)
     if not fwd_rets:
         return None
-    arr      = np.array(fwd_rets)
-    rounded  = np.round(arr * 100).astype(int)
-    mode_val = pd.Series(rounded).value_counts().index[0] / 100
+    arr = np.array(fwd_rets)
     return {
         "n_signals": len(arr),
         "mean":      arr.mean(),
         "median":    float(np.median(arr)),
-        "mode":      mode_val,
+        "max":       arr.max(),
         "min":       arr.min(),
     }
 
@@ -394,11 +392,11 @@ def render_fwd(stats, signal_series, label, color, container):
             st.info("No signals fired.")
             return
         rows = [
-            ("Signals fired",  stats["n_signals"]),
-            ("Mean return",    fmt_pct(stats["mean"])),
-            ("Median return",  fmt_pct(stats["median"])),
-            ("Mode return",    fmt_pct(stats["mode"])),
-            ("Lowest return",  fmt_pct(stats["min"])),
+            ("Signals fired",   stats["n_signals"]),
+            ("Mean return",     fmt_pct(stats["mean"])),
+            ("Median return",   fmt_pct(stats["median"])),
+            ("Highest return",  fmt_pct(stats["max"])),
+            ("Lowest return",   fmt_pct(stats["min"])),
         ]
         st.table(pd.DataFrame(rows, columns=["Metric", "Value"]).set_index("Metric"))
         close   = df_raw["close"]
