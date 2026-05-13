@@ -130,7 +130,9 @@ def build_trade_records(df, trades, ppy) -> list[dict]:
     close = df["close"]
     low   = df["low"]
     rows  = []
-    for entry_i, exit_i, exit_reason in trades:
+    for trade in trades:
+        entry_i, exit_i, exit_reason = (*trade, "Signal")[:3] if len(trade) == 2 else trade
+
         ep       = close.iloc[entry_i]
         xp       = close.iloc[exit_i]
         ret      = xp / ep - 1
