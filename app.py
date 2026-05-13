@@ -215,15 +215,16 @@ def run_significance_tests(
             "colour":     colour,
         })
 
-    # ── Test 2: One-sample t-test — mean trade return > 0 ─────────────────────
+    # ── Test 2: One-sample t-test — mean trade return > 10% ──────────────────
+    MEAN_RET_THRESHOLD = 0.10
     if n >= 2:
-        t2, p2 = stats.ttest_1samp(trade_rets, popmean=0, alternative="greater")
+        t2, p2 = stats.ttest_1samp(trade_rets, popmean=MEAN_RET_THRESHOLD, alternative="greater")
         label, colour = sig_verdict(p2)
         results.append({
-            "test":       "2 · Mean Trade Return > 0",
-            "method":     "One-sample t-test  (H₀: mean return = 0)",
+            "test":       "2 · Mean Trade Return > 10%",
+            "method":     f"One-sample t-test  (H₀: mean trade return = 10%)",
             "stat_label": "t-statistic",
-            "stat_val":   f"{t2:.3f}  (df = {n - 1})",
+            "stat_val":   f"{t2:.3f}  (df = {n - 1},  mean = {trade_rets.mean():.2%})",
             "p":          p2,
             "verdict":    label,
             "colour":     colour,
@@ -526,11 +527,11 @@ elif _n_trades < 30:
     st.warning(f"⚠️  {_n_trades} trades — tests have low statistical power. Treat results as indicative, not conclusive.")
 
 if _n_trades >= 2:
-    trade_ret_arr    = np.array([r["Return"] for r in records])
-    bh_ret_invested  = res["bh_ret"][invested_mask]
-    sig_results      = run_significance_tests(
+    trade_ret_arr   = np.array([r["Return"] for r in records])
+    bh_ret_invested = res["bh_ret"][invested_mask]
+    sig_results     = run_significance_tests(
         trade_ret_arr, active_ret, bh_ret_invested,
-        n_invested, ppy, strat_metrics["Sharpe Ratio"]
+        n_invested, ppy, strat_metrics["Sharpe Ratio"],
     )
 
     for sr in sig_results:
