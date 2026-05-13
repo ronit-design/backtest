@@ -175,6 +175,121 @@ def forward_return_stats(df, signal: pd.Series, periods: int) -> dict | None:
     }
 
 
+# ── monte carlo ───────────────────────────────────────────────────────────────
+
+def run_monte_carlo(pos_series: pd.Series, price_ret: pd.Series,
+                    ppy: int, n_sims: int, seed: int = 42) -> dict | None:
+    """
+    Permutation test: randomly select which n_invested bars to be invested
+    (preserving the same count as the real strategy), compute Sharpe for each
+    permutation, compare real Sharpe against the resulting null distribution.
+    """
+    positions = pos_series.shift(1).fillna(0).values.astype(float)
+    rets      = price_ret.values.astype(float)
+    n_bars    = len(rets)
+    n_inv     = int((positions > 0).sum())
+
+    if n_inv < 2:
+        return None
+
+    active_real = rets[positions > 0]
+    std_real    = active_real.std(ddof=1)
+    real_sr     = active_real.mean() / std_real * np.sqrt(ppy) if std_real > 0 else 0.0
+
+    rng = np.random.default_rng(seed)
+
+    if n_bars * n_sims <= 20_000_000:
+        # Fully vectorised: argsort of random floats = random permutation
+        rand_idx     = rng.random((n_sims, n_bars)).argsort(axis=1)[:, :n_inv]
+        sim_rets_all = rets[rand_idx]                          # (n_sims, n_inv)
+        sim_means    = sim_rets_all.mean(axis=1)
+        sim_stds     = sim_rets_all.std(axis=1, ddof=1)
+        valid        = sim_stds > 0
+        sim_sharpes  = np.where(valid, sim_means / sim_stds * np.sqrt(ppy), 0.0)
+    else:
+        # Loop fallback for large intraday datasets
+        sim_sharpes = np.empty(n_sims)
+        for i in range(n_sims):
+            idx = rng.choice(n_bars, size=n_inv, replace=False)
+            s   = rets[idx]
+            std = s.std(ddof=1)
+            sim_sharpes[i] = s.mean() / std * np.sqrt(ppy) if std > 0 else 0.0
+
+    percentile = float((sim_sharpes < real_sr).mean())
+    return {
+        "real_sr":    real_sr,
+        "sim_sharpes": sim_sharpes,
+        "percentile": percentile,
+        "p_value":    1.0 - percentile,
+        "n_sims":     n_sims,
+        "n_invested": n_inv,
+    }
+
+
+# ── walk-forward ──────────────────────────────────────────────────────────────
+
+def run_walk_forward(df: pd.DataFrame, buy_conds: list, sell_conds: list,
+                     n_folds: int, ppy: int, initial_capital: float) -> dict:
+    n         = len(df)
+    fold_size = n // n_folds
+    fold_results, eq_pieces, bh_pieces = [], [], []
+
+    for k in range(n_folds):
+        s       = k * fold_size
+        e       = (k + 1) * fold_size if k < n_folds - 1 else n
+        fold_df = df.iloc[s:e].copy()
+        if len(fold_df) < 3:
+            continue
+
+        fres    = run_backtest(fold_df, buy_conds, sell_conds, initial_capital=initial_capital)
+        inv_m   = fres["position"].shift(1).fillna(0).astype(bool)
+        n_inv   = int(inv_m.sum())
+        act_r   = fres["strat_ret"][inv_m]
+        fm      = calc_metrics(act_r, fres["strat_eq"], ppy, n_active=n_inv)
+        frec    = build_trade_records(fold_df, fres["trades"], ppy)
+
+        if frec:
+            fm["Max Drawdown"] = min(r["Max DD"] for r in frec)
+
+        win_r = sum(r["Win"] for r in frec) / len(frec) if frec else np.nan
+
+        fold_results.append({
+            "Fold":         k + 1,
+            "Period":       f"{fold_df.index[0].date()} → {fold_df.index[-1].date()}",
+            "Bars":         len(fold_df),
+            "Trades":       len(frec),
+            "Total Return": fm["Total Return"],
+            "Ann. Return":  fm["Ann. Return"],
+            "Sharpe":       fm["Sharpe Ratio"],
+            "Max DD":       fm["Max Drawdown"],
+            "Win Rate":     win_r,
+        })
+        eq_pieces.append(fres["strat_eq"])
+        bh_pieces.append(fres["bh_eq"])
+
+    def stitch(pieces):
+        if not pieces:
+            return None
+        segs, running = [], initial_capital
+        for p in pieces:
+            scaled = p * (running / p.iloc[0])
+            segs.append(scaled)
+            running = scaled.iloc[-1]
+        return pd.concat(segs)
+
+    sharpes   = [r["Sharpe"] for r in fold_results
+                 if not np.isnan(r.get("Sharpe") or np.nan)]
+    pos_folds = sum(1 for s in sharpes if s > 0)
+
+    return {
+        "fold_results":   fold_results,
+        "stitched_eq":    stitch(eq_pieces),
+        "stitched_bh":    stitch(bh_pieces),
+        "pct_pos_folds":  pos_folds / len(fold_results) if fold_results else 0.0,
+        "mean_fold_sr":   float(np.mean(sharpes)) if sharpes else np.nan,
+    }
+
+
 # ── statistical significance ──────────────────────────────────────────────────
 
 def sig_verdict(p: float) -> tuple[str, str]:
@@ -631,3 +746,123 @@ def render_fwd(stats, signal_series, label, color, container):
 
 render_fwd(fwd_buy,  res["buy_sig"],  "Buy",  "#2563eb", fwd_left)
 render_fwd(fwd_sell, res["sell_sig"], "Sell", "#ef4444", fwd_right)
+
+st.divider()
+
+# ── walk-forward validation ───────────────────────────────────────────────────
+st.subheader("Walk-Forward Validation")
+st.caption("Splits the dataset into N equal temporal folds and runs the strategy on each independently. Tests consistency — does the strategy work across different time periods, or is it driven by one lucky window?")
+
+wf_c1, wf_c2 = st.columns([1, 3])
+n_folds = wf_c1.number_input("Number of folds", min_value=3, max_value=10, value=5, step=1)
+
+if st.button("Run Walk-Forward", use_container_width=True):
+    with st.spinner("Running walk-forward validation…"):
+        st.session_state["wf_result"] = run_walk_forward(
+            df_raw, buy_conds, sell_conds, int(n_folds), ppy, capital
+        )
+
+if "wf_result" in st.session_state:
+    wf = st.session_state["wf_result"]
+
+    # ── consistency summary ───────────────────────────────────────────────────
+    cs1, cs2, cs3 = st.columns(3)
+    cs1.metric("Folds with positive Sharpe",
+               f"{int(wf['pct_pos_folds'] * len(wf['fold_results']))} / {len(wf['fold_results'])}")
+    cs2.metric("Mean fold Sharpe", fmt_f2(wf["mean_fold_sr"]))
+    cs3.metric("Consistency",
+               f"{wf['pct_pos_folds']:.0%}",
+               help="% of folds where Sharpe > 0")
+
+    # ── per-fold table ────────────────────────────────────────────────────────
+    fold_display = []
+    for r in wf["fold_results"]:
+        fold_display.append({
+            "Fold":         r["Fold"],
+            "Period":       r["Period"],
+            "Bars":         r["Bars"],
+            "Trades":       r["Trades"],
+            "Total Return": fmt_pct(r["Total Return"]) if not np.isnan(r["Total Return"]) else "—",
+            "Ann. Return":  fmt_pct(r["Ann. Return"])  if not np.isnan(r["Ann. Return"])  else "—",
+            "Sharpe":       fmt_f2(r["Sharpe"]),
+            "Max DD":       fmt_pct(r["Max DD"])        if not np.isnan(r["Max DD"])        else "—",
+            "Win Rate":     fmt_pct(r["Win Rate"])      if not np.isnan(r["Win Rate"])      else "—",
+        })
+    st.dataframe(pd.DataFrame(fold_display), use_container_width=True, hide_index=True)
+
+    # ── stitched equity curve ─────────────────────────────────────────────────
+    if wf["stitched_eq"] is not None:
+        fig_wf = go.Figure()
+        fig_wf.add_trace(go.Scatter(
+            x=wf["stitched_eq"].index, y=wf["stitched_eq"],
+            name="Strategy (OOS stitched)", line=dict(color="#2563eb", width=2)))
+        if wf["stitched_bh"] is not None:
+            fig_wf.add_trace(go.Scatter(
+                x=wf["stitched_bh"].index, y=wf["stitched_bh"],
+                name="Buy & Hold", line=dict(color="#9ca3af", width=1.5, dash="dot")))
+        fig_wf.update_layout(
+            height=380, yaxis_title="$",
+            legend=dict(orientation="h"), margin=dict(l=0, r=0, t=10, b=0),
+            title="Stitched out-of-sample equity curve")
+        st.plotly_chart(fig_wf, use_container_width=True)
+
+st.divider()
+
+# ── monte carlo permutation ───────────────────────────────────────────────────
+st.subheader("Monte Carlo Permutation Test")
+st.caption("Randomly shuffles which bars the strategy is invested in (preserving the same number of invested periods), repeats thousands of times, and asks: how often does a random timing strategy match or beat your Sharpe? A low p-value means your signal timing is genuinely adding value.")
+
+_default_sims = {6_552: 1_000, 252: 5_000, 52: 10_000, 12: 10_000, 4: 10_000}
+_default_n    = _default_sims.get(ppy, 5_000)
+
+mc_c1, mc_c2 = st.columns([1, 3])
+n_sims_input  = mc_c1.number_input("Simulations", min_value=500, max_value=50_000,
+                                    value=_default_n, step=500)
+
+if st.button("Run Monte Carlo", use_container_width=True):
+    with st.spinner(f"Running {n_sims_input:,} permutations…"):
+        st.session_state["mc_result"] = run_monte_carlo(
+            res["position"], res["bh_ret"], ppy, int(n_sims_input)
+        )
+
+if "mc_result" in st.session_state:
+    mc = st.session_state["mc_result"]
+
+    mc_p      = mc["p_value"]
+    mc_label, mc_colour = sig_verdict(mc_p)
+
+    # ── headline metrics ──────────────────────────────────────────────────────
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Your Sharpe",          fmt_f2(mc["real_sr"]))
+    mc2.metric("Median random Sharpe", fmt_f2(float(np.median(mc["sim_sharpes"]))))
+    mc3.metric("Percentile rank",      f"{mc['percentile']:.1%}")
+    mc4.metric("p-value",              f"{mc_p:.4f}")
+
+    st.markdown(
+        f"<div style='text-align:center; padding:10px; border-radius:6px; "
+        f"color:{mc_colour}; font-weight:700; font-size:1rem; "
+        f"border: 1px solid {mc_colour};'>{mc_label}</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Your Sharpe of {mc['real_sr']:.3f} beats {mc['percentile']:.1%} of {mc['n_sims']:,} randomly-timed strategies with the same number of invested bars ({mc['n_invested']:,}).")
+
+    # ── distribution histogram ────────────────────────────────────────────────
+    fig_mc = go.Figure()
+    fig_mc.add_trace(go.Histogram(
+        x=mc["sim_sharpes"], nbinsx=60,
+        name="Random strategies",
+        marker_color="#9ca3af", opacity=0.7,
+    ))
+    fig_mc.add_vline(
+        x=mc["real_sr"], line_color="#2563eb", line_width=2.5,
+        annotation_text=f"  Your SR: {mc['real_sr']:.3f}",
+        annotation_font_color="#2563eb",
+        annotation_position="top right",
+    )
+    fig_mc.update_layout(
+        height=320, margin=dict(l=0, r=0, t=10, b=0),
+        xaxis_title="Sharpe ratio (random permutations)",
+        yaxis_title="Count",
+        legend=dict(orientation="h"),
+    )
+    st.plotly_chart(fig_mc, use_container_width=True)
