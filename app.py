@@ -42,23 +42,37 @@ def build_signal(df, conditions):
     return sig
 
 
-def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000):
-    buy_sig  = build_signal(df, buy_conds)
-    sell_sig = build_signal(df, sell_conds)
+def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000, take_profit=None):
+    """
+    take_profit : float | None
+        If set (e.g. 0.20 for 20%), exit as soon as the return from
+        entry close reaches this threshold, regardless of sell signal.
+    trades stored as (entry_bar_idx, exit_bar_idx, exit_reason)
+    """
+    buy_sig   = build_signal(df, buy_conds)
+    sell_sig  = build_signal(df, sell_conds)
+    close_arr = df["close"].values
 
-    position = [0] * len(df)
-    in_pos   = False
-    trades   = []   # (entry_bar_idx, exit_bar_idx)
-    entry_i  = None
+    position  = [0] * len(df)
+    in_pos    = False
+    trades    = []   # (entry_bar_idx, exit_bar_idx, exit_reason)
+    entry_i   = None
+    entry_px  = None
 
     for i in range(len(df)):
         if not in_pos and buy_sig.iloc[i]:
-            in_pos  = True
-            entry_i = i
-        elif in_pos and sell_sig.iloc[i]:
-            in_pos  = False
-            trades.append((entry_i, i))
-            entry_i = None
+            in_pos   = True
+            entry_i  = i
+            entry_px = close_arr[i]
+        elif in_pos:
+            tp_hit   = (take_profit is not None and
+                        (close_arr[i] / entry_px - 1) >= take_profit)
+            sig_hit  = sell_sig.iloc[i]
+            if tp_hit or sig_hit:
+                reason  = "Take Profit" if tp_hit else "Signal"
+                in_pos  = False
+                trades.append((entry_i, i, reason))
+                entry_i = entry_px = None
         position[i] = 1 if in_pos else 0
 
     # open trade: do NOT add to trades list (excluded from all trade statistics)
@@ -116,13 +130,12 @@ def build_trade_records(df, trades, ppy) -> list[dict]:
     close = df["close"]
     low   = df["low"]
     rows  = []
-    for entry_i, exit_i in trades:
+    for entry_i, exit_i, exit_reason in trades:
         ep       = close.iloc[entry_i]
         xp       = close.iloc[exit_i]
         ret      = xp / ep - 1
         bars     = exit_i - entry_i
         ann      = (1 + ret) ** (ppy / bars) - 1 if bars > 0 else np.nan
-        # max drawdown: entry close → lowest low during the holding period
         lowest   = low.iloc[entry_i : exit_i + 1].min()
         trade_dd = (lowest - ep) / ep
         rows.append({
@@ -135,6 +148,7 @@ def build_trade_records(df, trades, ppy) -> list[dict]:
             "Ann. return": ann,
             "Max DD":      trade_dd,
             "Win":         ret > 0,
+            "Exit":        exit_reason,
         })
     return rows
 
@@ -230,7 +244,8 @@ def run_monte_carlo(pos_series: pd.Series, price_ret: pd.Series,
 # ── walk-forward ──────────────────────────────────────────────────────────────
 
 def run_walk_forward(df: pd.DataFrame, buy_conds: list, sell_conds: list,
-                     n_folds: int, ppy: int, initial_capital: float) -> dict:
+                     n_folds: int, ppy: int, initial_capital: float,
+                     take_profit: float | None = None) -> dict:
     n         = len(df)
     fold_size = n // n_folds
     fold_results, eq_pieces, bh_pieces = [], [], []
@@ -242,7 +257,8 @@ def run_walk_forward(df: pd.DataFrame, buy_conds: list, sell_conds: list,
         if len(fold_df) < 3:
             continue
 
-        fres    = run_backtest(fold_df, buy_conds, sell_conds, initial_capital=initial_capital)
+        fres    = run_backtest(fold_df, buy_conds, sell_conds,
+                              initial_capital=initial_capital, take_profit=take_profit)
         inv_m   = fres["position"].shift(1).fillna(0).astype(bool)
         n_inv   = int(inv_m.sum())
         act_r   = fres["strat_ret"][inv_m]
@@ -513,16 +529,29 @@ with right:
         st.caption(f"Sell condition {i+1}")
         sell_conds.append(condition_row(f"sell_{i}", numeric_cols))
 
+tp_col1, tp_col2 = st.columns([1, 3])
+tp_enabled   = tp_col1.toggle("Take Profit exit", value=False)
+take_profit  = (tp_col1.number_input(
+                    "Take profit threshold (%)", min_value=0.1, max_value=1000.0,
+                    value=20.0, step=0.5,
+                    help="Exit the trade when return from entry reaches this level."
+                ) / 100.0) if tp_enabled else None
+if tp_enabled:
+    tp_col2.info(f"Strategy will exit any trade once return from entry reaches **{take_profit:.0%}**, "
+                 f"whichever comes first — take profit or sell signal.")
+
 run = st.button("Run Backtest", type="primary", use_container_width=True)
 
 if run:
     with st.spinner("Running…"):
-        res = run_backtest(df_raw, buy_conds, sell_conds, initial_capital=capital)
-        st.session_state["res"]        = res
-        st.session_state["buy_conds"]  = buy_conds
-        st.session_state["sell_conds"] = sell_conds
-        st.session_state["ppy"]        = ppy
-        st.session_state["capital"]    = capital
+        res = run_backtest(df_raw, buy_conds, sell_conds,
+                           initial_capital=capital, take_profit=take_profit)
+        st.session_state["res"]          = res
+        st.session_state["buy_conds"]    = buy_conds
+        st.session_state["sell_conds"]   = sell_conds
+        st.session_state["ppy"]          = ppy
+        st.session_state["capital"]      = capital
+        st.session_state["take_profit"]  = take_profit
         # clear advanced results so stale data doesn't show for a new strategy
         st.session_state.pop("wf_result", None)
         st.session_state.pop("mc_result", None)
@@ -727,6 +756,7 @@ else:
             "Return":        fmt_pct(r["Return"]),
             "Ann. return":   fmt_pct(r["Ann. return"]) if not np.isnan(r["Ann. return"]) else "—",
             "Max DD":        fmt_pct(r["Max DD"]),
+            "Exit":          r["Exit"],
             "Win":           "✓" if r["Win"] else "✗",
         })
     # append live trade row if a position is still open (reference only)
@@ -812,6 +842,7 @@ if st.button("Run Walk-Forward", use_container_width=True):
             int(n_folds),
             st.session_state["ppy"],
             st.session_state["capital"],
+            take_profit=st.session_state.get("take_profit"),
         )
 
 if "wf_result" in st.session_state:
