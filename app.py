@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy import stats
 
 st.set_page_config(page_title="Backtester", layout="wide")
 
@@ -172,6 +173,120 @@ def forward_return_stats(df, signal: pd.Series, periods: int) -> dict | None:
         "max":       arr.max(),
         "min":       arr.min(),
     }
+
+
+# ── statistical significance ──────────────────────────────────────────────────
+
+def sig_verdict(p: float) -> tuple[str, str]:
+    """Return (label, hex_colour) for a p-value."""
+    if p < 0.05:   return "✅  Significant (p < 0.05)",   "#16a34a"
+    if p < 0.10:   return "⚠️  Borderline (p < 0.10)",    "#d97706"
+    return             "❌  Not significant (p ≥ 0.10)", "#dc2626"
+
+
+def run_significance_tests(
+    trade_rets:       np.ndarray,   # per-trade returns
+    strat_ret_active: pd.Series,    # bar returns while invested
+    bh_ret_invested:  pd.Series,    # B&H returns over same bars
+    n_invested:       int,
+    ppy:              int,
+    sharpe:           float,
+) -> list[dict]:
+    """
+    Returns a list of result dicts, each with keys:
+      name, stat_label, stat_val, p, verdict, colour
+    Bootstrap CI result has ci_low/ci_high instead of p/verdict.
+    """
+    n = len(trade_rets)
+    results = []
+
+    # ── Test 1: Binomial test on win rate ──────────────────────────────────────
+    if n >= 1:
+        wins = int(np.sum(trade_rets > 0))
+        res1 = stats.binomtest(wins, n, p=0.5, alternative="greater")
+        label, colour = sig_verdict(res1.pvalue)
+        results.append({
+            "test":       "1 · Win Rate vs 50%",
+            "method":     "Binomial test  (H₀: win rate = 50%)",
+            "stat_label": "Win rate",
+            "stat_val":   f"{wins}/{n} = {wins/n:.1%}",
+            "p":          res1.pvalue,
+            "verdict":    label,
+            "colour":     colour,
+        })
+
+    # ── Test 2: One-sample t-test — mean trade return > 0 ─────────────────────
+    if n >= 2:
+        t2, p2 = stats.ttest_1samp(trade_rets, popmean=0, alternative="greater")
+        label, colour = sig_verdict(p2)
+        results.append({
+            "test":       "2 · Mean Trade Return > 0",
+            "method":     "One-sample t-test  (H₀: mean return = 0)",
+            "stat_label": "t-statistic",
+            "stat_val":   f"{t2:.3f}  (df = {n - 1})",
+            "p":          p2,
+            "verdict":    label,
+            "colour":     colour,
+        })
+
+    # ── Test 3: Sharpe significance — Lo (2002) ────────────────────────────────
+    if not np.isnan(sharpe) and n_invested >= ppy:
+        t_years  = n_invested / ppy
+        # Lo (2002): accounts for the variance of the Sharpe estimator itself
+        t3       = sharpe * np.sqrt(t_years) / np.sqrt(1 + sharpe ** 2 / 2)
+        p3       = 1 - stats.t.cdf(t3, df=max(n_invested - 1, 1))
+        label, colour = sig_verdict(p3)
+        hlz_flag = "  ·  ⚡ clears HLZ 3.0 threshold" if abs(t3) >= 3.0 else ""
+        results.append({
+            "test":       "3 · Sharpe Ratio > 0",
+            "method":     f"Lo (2002) adjusted t-test  ({t_years:.1f} years invested){hlz_flag}",
+            "stat_label": "t-statistic",
+            "stat_val":   f"{t3:.3f}",
+            "p":          p3,
+            "verdict":    label,
+            "colour":     colour,
+        })
+
+    # ── Test 4: Bootstrap 95% CI on mean trade return (10 000 resamples) ──────
+    if n >= 2:
+        rng        = np.random.default_rng(42)
+        boot_means = rng.choice(trade_rets, size=(10_000, n), replace=True).mean(axis=1)
+        ci_lo, ci_hi = np.percentile(boot_means, [2.5, 97.5])
+        significant  = ci_lo > 0
+        label  = "✅  Significant — CI excludes 0" if significant else "❌  Not significant — CI includes 0"
+        colour = "#16a34a" if significant else "#dc2626"
+        results.append({
+            "test":       "4 · Mean Return Bootstrap CI",
+            "method":     "Bootstrap resampling  10 000 iterations, 95% CI",
+            "stat_label": "95% CI",
+            "stat_val":   f"[{ci_lo:.2%},  {ci_hi:.2%}]",
+            "p":          None,
+            "verdict":    label,
+            "colour":     colour,
+            "ci_lo":      ci_lo,
+            "ci_hi":      ci_hi,
+        })
+
+    # ── Test 5: Strategy vs B&H — Welch's t-test ──────────────────────────────
+    if len(strat_ret_active) >= 2 and len(bh_ret_invested) >= 2:
+        t5, p5 = stats.ttest_ind(
+            strat_ret_active.values,
+            bh_ret_invested.values,
+            equal_var=False,
+            alternative="greater",
+        )
+        label, colour = sig_verdict(p5)
+        results.append({
+            "test":       "5 · Strategy Returns > Buy & Hold",
+            "method":     "Welch's t-test  (unequal variances, invested bars only)",
+            "stat_label": "t-statistic",
+            "stat_val":   f"{t5:.3f}",
+            "p":          p5,
+            "verdict":    label,
+            "colour":     colour,
+        })
+
+    return results
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -397,6 +512,59 @@ else:
         fig_h.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0),
                             xaxis_title="Return per trade (%)", yaxis_title="Count")
         st.plotly_chart(fig_h, use_container_width=True)
+
+st.divider()
+
+# ── statistical significance ──────────────────────────────────────────────────
+st.subheader("Statistical Significance")
+
+_n_trades = len(records)
+if _n_trades < 10:
+    st.error(f"⚠️  Only {_n_trades} trades — too few for meaningful significance testing. Results below are illustrative only.")
+elif _n_trades < 30:
+    st.warning(f"⚠️  {_n_trades} trades — tests have low statistical power. Treat results as indicative, not conclusive.")
+
+if _n_trades >= 2:
+    trade_ret_arr    = np.array([r["Return"] for r in records])
+    bh_ret_invested  = res["bh_ret"][invested_mask]
+    sig_results      = run_significance_tests(
+        trade_ret_arr, active_ret, bh_ret_invested,
+        n_invested, ppy, strat_metrics["Sharpe Ratio"]
+    )
+
+    for sr in sig_results:
+        with st.container(border=True):
+            row_l, row_r = st.columns([3, 1])
+            with row_l:
+                st.markdown(f"**{sr['test']}**")
+                st.caption(sr["method"])
+                st.markdown(f"`{sr['stat_label']}:` **{sr['stat_val']}**")
+                if sr["p"] is not None:
+                    st.markdown(f"`p-value:` **{sr['p']:.4f}**")
+            with row_r:
+                st.markdown(
+                    f"<div style='text-align:center; padding:14px 0; "
+                    f"color:{sr['colour']}; font-weight:700; font-size:0.9rem;'>"
+                    f"{sr['verdict']}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── Multiple testing warning (Harvey, Liu & Zhu 2016) ────────────────────
+    with st.expander("⚡  About multiple testing & the HLZ threshold"):
+        st.markdown("""
+**If you have run this backtester across multiple strategy configurations** (different
+thresholds, different indicators, different tickers), the standard p < 0.05 threshold
+understates your probability of finding a false positive.
+
+Harvey, Liu & Zhu (2016) showed that given the number of strategies tested across the
+finance industry, a result should clear a **t-statistic of ≥ 3.0** (p ≈ 0.003) before
+being considered credible — not the standard 1.96.
+
+Test 3 flags automatically when the Sharpe t-statistic clears this bar. A strategy
+that passes at 95% confidence is *promising*. One that also clears t = 3.0 is *credible*.
+        """)
+else:
+    st.info("Need at least 2 completed trades to run significance tests.")
 
 st.divider()
 
