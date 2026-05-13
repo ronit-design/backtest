@@ -10,7 +10,13 @@ NUMERIC_OPS = [">", "<", ">=", "<=", "=="]
 CROSS_OPS   = ["crosses above", "crosses below"]
 ALL_OPS     = NUMERIC_OPS + CROSS_OPS
 
-FREQ_MAP = {"Daily": 252, "Weekly": 52, "Monthly": 12, "Quarterly": 4}
+FREQ_MAP = {
+    "15-Min":    6_552,   # 26 bars/day × 252 trading days
+    "Daily":       252,
+    "Weekly":       52,
+    "Monthly":      12,
+    "Quarterly":     4,
+}
 
 # ── core logic ────────────────────────────────────────────────────────────────
 
@@ -209,11 +215,6 @@ df_raw.columns = [c.lower() if c.lower() in {"time","open","high","low","close",
 df_raw["time"] = pd.to_datetime(df_raw["time"])
 df_raw = df_raw.sort_values("time").reset_index(drop=True).set_index("time")
 
-if "volume" in df_raw.columns:
-    df_raw["Vol / 24M Avg"] = df_raw["volume"] / df_raw["volume"].rolling(24, min_periods=1).mean()
-
-numeric_cols = df_raw.select_dtypes(include=[np.number]).columns.tolist()
-
 with st.expander("Data preview", expanded=False):
     st.dataframe(df_raw.tail(20), use_container_width=True)
 
@@ -222,9 +223,24 @@ st.divider()
 # ── strategy builder ──────────────────────────────────────────────────────────
 st.subheader("Strategy Rules")
 
-freq_choice = st.selectbox("Data frequency (for annualisation)", list(FREQ_MAP.keys()), index=2)
+c1, c2, c3 = st.columns(3)
+freq_choice = c1.selectbox("Data frequency", list(FREQ_MAP.keys()), index=3)
 ppy         = FREQ_MAP[freq_choice]
-capital     = st.number_input("Starting capital ($)", value=10_000, step=1_000)
+capital     = c2.number_input("Starting capital ($)", value=10_000, step=1_000)
+fwd_periods = c3.number_input(
+    "Forward-return window (bars)",
+    min_value=1, value=ppy,
+    help=f"Periods to look ahead in signal analysis. Default = 1 year ({ppy} bars for {freq_choice})."
+)
+
+# vol ratio: rolling 2-year window in bars (computed here so ppy is known)
+vol_window  = 2 * ppy
+vol_col     = f"Vol / 2Y Avg"
+if "volume" in df_raw.columns:
+    roll_avg = df_raw["volume"].rolling(vol_window, min_periods=vol_window).mean()
+    df_raw[vol_col] = df_raw["volume"] / roll_avg
+
+numeric_cols = df_raw.select_dtypes(include=[np.number]).columns.tolist()
 
 left, right = st.columns(2)
 with left:
@@ -386,11 +402,11 @@ else:
 st.divider()
 
 # ── forward return analysis ───────────────────────────────────────────────────
-st.subheader("Forward Return Analysis (12 periods after signal)")
-st.caption("Every time the buy or sell condition fires — including signals that don't open/close a trade — what did the asset return over the next 12 periods?")
+st.subheader(f"Forward Return Analysis ({fwd_periods} bars after signal)")
+st.caption(f"Every time the buy or sell condition fires, what did the asset return over the next {fwd_periods} bars ({freq_choice} data)?")
 
-fwd_buy  = forward_return_stats(df_raw, res["buy_sig"],  ppy)
-fwd_sell = forward_return_stats(df_raw, res["sell_sig"], ppy)
+fwd_buy  = forward_return_stats(df_raw, res["buy_sig"],  fwd_periods)
+fwd_sell = forward_return_stats(df_raw, res["sell_sig"], fwd_periods)
 
 fwd_left, fwd_right = st.columns(2)
 
@@ -419,7 +435,7 @@ def render_fwd(stats, signal_series, label, color, container):
             fig_h = go.Figure(go.Histogram(x=[r * 100 for r in rets], nbinsx=20,
                                            marker_color=color, opacity=0.75))
             fig_h.update_layout(height=210, margin=dict(l=0, r=0, t=10, b=0),
-                                xaxis_title="12-period forward return (%)", yaxis_title="Count")
+                                xaxis_title=f"{fwd_periods}-bar forward return (%)", yaxis_title="Count")
             st.plotly_chart(fig_h, use_container_width=True)
 
 render_fwd(fwd_buy,  res["buy_sig"],  "Buy",  "#2563eb", fwd_left)
