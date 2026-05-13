@@ -106,23 +106,27 @@ def calc_metrics(ret: pd.Series, equity: pd.Series, ppy: int, n_active: int | No
 def build_trade_records(df, trades, ppy) -> list[dict]:
     idx   = df.index
     close = df["close"]
+    low   = df["low"]
     rows  = []
     for entry_i, exit_i in trades:
-        ep    = close.iloc[entry_i]
-        xp    = close.iloc[exit_i]
-        ret   = xp / ep - 1
-        bars  = exit_i - entry_i
-        # annualise per-trade return by bars held
-        ann   = (1 + ret) ** (ppy / bars) - 1 if bars > 0 else np.nan
+        ep       = close.iloc[entry_i]
+        xp       = close.iloc[exit_i]
+        ret      = xp / ep - 1
+        bars     = exit_i - entry_i
+        ann      = (1 + ret) ** (ppy / bars) - 1 if bars > 0 else np.nan
+        # max drawdown: entry close → lowest low during the holding period
+        lowest   = low.iloc[entry_i : exit_i + 1].min()
+        trade_dd = (lowest - ep) / ep
         rows.append({
-            "Entry date":       idx[entry_i].date(),
-            "Exit date":        idx[exit_i].date(),
-            "Bars held":        bars,
-            "Entry price":      round(ep, 4),
-            "Exit price":       round(xp, 4),
-            "Return":           ret,
-            "Ann. return":      ann,
-            "Win":              ret > 0,
+            "Entry date":  idx[entry_i].date(),
+            "Exit date":   idx[exit_i].date(),
+            "Bars held":   bars,
+            "Entry price": round(ep, 4),
+            "Exit price":  round(xp, 4),
+            "Return":      ret,
+            "Ann. return": ann,
+            "Max DD":      trade_dd,
+            "Win":         ret > 0,
         })
     return rows
 
@@ -255,13 +259,17 @@ active_ret    = res["strat_ret"][invested_mask]   # returns only while in positi
 strat_metrics = calc_metrics(active_ret, res["strat_eq"], ppy, n_active=n_invested)
 bh_metrics    = calc_metrics(res["bh_ret"], res["bh_eq"], ppy)
 
-records    = build_trade_records(df_raw, res["trades"], ppy)
-tstats     = trade_stats(records)
+records     = build_trade_records(df_raw, res["trades"], ppy)
+tstats      = trade_stats(records)
 time_in_mkt = res["position"].mean()
+
+# override strategy max DD: worst (entry → lowest low) across all trades
+if records:
+    strat_metrics["Max Drawdown"] = min(r["Max DD"] for r in records)
 
 # ── performance summary ───────────────────────────────────────────────────────
 st.subheader("Performance Summary")
-st.caption("Strategy annualised over time actually invested; Buy & Hold annualised over the full period.")
+st.caption("Strategy: annualised over time invested; max DD = entry price → lowest low per trade. Buy & Hold: full-period annualisation; max DD = equity curve peak-to-trough.")
 
 metric_cols = st.columns(5)
 labels = ["Total Return", "Ann. Return", "Ann. Volatility", "Sharpe Ratio", "Max Drawdown"]
@@ -370,6 +378,7 @@ else:
             "Exit price":    r["Exit price"],
             "Return":        fmt_pct(r["Return"]),
             "Ann. return":   fmt_pct(r["Ann. return"]) if not np.isnan(r["Ann. return"]) else "—",
+            "Max DD":        fmt_pct(r["Max DD"]),
             "Win":           "✓" if r["Win"] else "✗",
         })
     st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
