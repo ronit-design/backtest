@@ -513,12 +513,23 @@ with right:
         sell_conds.append(condition_row(f"sell_{i}", numeric_cols))
 
 run = st.button("Run Backtest", type="primary", use_container_width=True)
-if not run:
+
+if run:
+    with st.spinner("Running…"):
+        res = run_backtest(df_raw, buy_conds, sell_conds, initial_capital=capital)
+        st.session_state["res"]        = res
+        st.session_state["buy_conds"]  = buy_conds
+        st.session_state["sell_conds"] = sell_conds
+        st.session_state["ppy"]        = ppy
+        st.session_state["capital"]    = capital
+        # clear advanced results so stale data doesn't show for a new strategy
+        st.session_state.pop("wf_result", None)
+        st.session_state.pop("mc_result", None)
+
+if "res" not in st.session_state:
     st.stop()
 
-# ── run ───────────────────────────────────────────────────────────────────────
-with st.spinner("Running…"):
-    res = run_backtest(df_raw, buy_conds, sell_conds, initial_capital=capital)
+res = st.session_state["res"]
 
 # invested bars (shift(1) matches how strat_ret is built)
 invested_mask = res["position"].shift(1).fillna(0).astype(bool)
@@ -759,7 +770,12 @@ n_folds = wf_c1.number_input("Number of folds", min_value=3, max_value=10, value
 if st.button("Run Walk-Forward", use_container_width=True):
     with st.spinner("Running walk-forward validation…"):
         st.session_state["wf_result"] = run_walk_forward(
-            df_raw, buy_conds, sell_conds, int(n_folds), ppy, capital
+            df_raw,
+            st.session_state["buy_conds"],
+            st.session_state["sell_conds"],
+            int(n_folds),
+            st.session_state["ppy"],
+            st.session_state["capital"],
         )
 
 if "wf_result" in st.session_state:
@@ -822,7 +838,8 @@ n_sims_input  = mc_c1.number_input("Simulations", min_value=500, max_value=50_00
 if st.button("Run Monte Carlo", use_container_width=True):
     with st.spinner(f"Running {n_sims_input:,} permutations…"):
         st.session_state["mc_result"] = run_monte_carlo(
-            res["position"], res["bh_ret"], ppy, int(n_sims_input)
+            res["position"], res["bh_ret"],
+            st.session_state["ppy"], int(n_sims_input)
         )
 
 if "mc_result" in st.session_state:
