@@ -212,7 +212,7 @@ if missing:
 df_raw.columns = [c.lower() if c.lower() in {"time","open","high","low","close","volume"} else c
                   for c in df_raw.columns]
 
-df_raw["time"] = pd.to_datetime(df_raw["time"])
+df_raw["time"] = pd.to_datetime(df_raw["time"], format="mixed", dayfirst=False)
 df_raw = df_raw.sort_values("time").reset_index(drop=True).set_index("time")
 
 with st.expander("Data preview", expanded=False):
