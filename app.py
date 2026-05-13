@@ -454,6 +454,14 @@ if not uploaded:
 df_raw = pd.read_csv(uploaded)
 df_raw.columns = df_raw.columns.str.strip()
 
+# clear cached results whenever a different file is uploaded
+_file_id = f"{uploaded.name}_{uploaded.size}"
+if st.session_state.get("_file_id") != _file_id:
+    for _k in ("res", "wf_result", "mc_result", "buy_conds", "sell_conds",
+               "ppy", "capital", "take_profit"):
+        st.session_state.pop(_k, None)
+    st.session_state["_file_id"] = _file_id
+
 required = {"time", "open", "high", "low", "close"}
 missing  = required - set(df_raw.columns.str.lower())
 if missing:
