@@ -229,19 +229,20 @@ def run_significance_tests(
             "colour":     colour,
         })
 
-    # ── Test 3: Sharpe significance — Lo (2002) ────────────────────────────────
+    # ── Test 3: Sharpe significance — Lo (2002), H₀: SR = 0.6 ────────────────
+    SR_THRESHOLD = 0.6
     if not np.isnan(sharpe) and n_invested >= ppy:
         t_years  = n_invested / ppy
-        # Lo (2002): accounts for the variance of the Sharpe estimator itself
-        t3       = sharpe * np.sqrt(t_years) / np.sqrt(1 + sharpe ** 2 / 2)
+        # Lo (2002): (SR_hat - threshold) / sqrt((1 + SR_hat²/2) / T)
+        t3       = (sharpe - SR_THRESHOLD) * np.sqrt(t_years) / np.sqrt(1 + sharpe ** 2 / 2)
         p3       = 1 - stats.t.cdf(t3, df=max(n_invested - 1, 1))
         label, colour = sig_verdict(p3)
         hlz_flag = "  ·  ⚡ clears HLZ 3.0 threshold" if abs(t3) >= 3.0 else ""
         results.append({
-            "test":       "3 · Sharpe Ratio > 0",
-            "method":     f"Lo (2002) adjusted t-test  ({t_years:.1f} years invested){hlz_flag}",
+            "test":       "3 · Sharpe Ratio > 0.6",
+            "method":     f"Lo (2002) adjusted t-test  (H₀: SR = 0.6,  {t_years:.1f} years invested){hlz_flag}",
             "stat_label": "t-statistic",
-            "stat_val":   f"{t3:.3f}",
+            "stat_val":   f"{t3:.3f}  (SR = {sharpe:.3f})",
             "p":          p3,
             "verdict":    label,
             "colour":     colour,
@@ -251,14 +252,14 @@ def run_significance_tests(
     if n >= 2:
         rng        = np.random.default_rng(42)
         boot_means = rng.choice(trade_rets, size=(10_000, n), replace=True).mean(axis=1)
-        ci_lo, ci_hi = np.percentile(boot_means, [2.5, 97.5])
+        ci_lo, ci_hi = np.percentile(boot_means, [5, 95])
         significant  = ci_lo > 0
         label  = "✅  Significant — CI excludes 0" if significant else "❌  Not significant — CI includes 0"
         colour = "#16a34a" if significant else "#dc2626"
         results.append({
             "test":       "4 · Mean Return Bootstrap CI",
-            "method":     "Bootstrap resampling  10 000 iterations, 95% CI",
-            "stat_label": "95% CI",
+            "method":     "Bootstrap resampling  10 000 iterations, 90% CI (5% each tail)",
+            "stat_label": "90% CI",
             "stat_val":   f"[{ci_lo:.2%},  {ci_hi:.2%}]",
             "p":          None,
             "verdict":    label,
