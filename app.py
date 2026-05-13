@@ -729,7 +729,28 @@ else:
             "Max DD":        fmt_pct(r["Max DD"]),
             "Win":           "✓" if r["Win"] else "✗",
         })
+    # append live trade row if a position is still open (reference only)
+    if res["open_trade"] is not None:
+        oi         = res["open_trade"]
+        entry_px   = df_raw["close"].iloc[oi]
+        current_px = df_raw["close"].iloc[-1]
+        unreal_ret = current_px / entry_px - 1
+        bars_open  = len(df_raw) - 1 - oi
+        display_rows.append({
+            "Entry date":  df_raw.index[oi].date(),
+            "Exit date":   "OPEN",
+            "Bars held":   bars_open,
+            "Entry price": round(entry_px, 4),
+            "Exit price":  round(current_px, 4),
+            "Return":      fmt_pct(unreal_ret) + " *",
+            "Ann. return": "—",
+            "Max DD":      "—",
+            "Win":         "~",
+        })
+
     st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+    if res["open_trade"] is not None:
+        st.caption("* Live position — unrealised P&L shown for reference only, excluded from all statistics.")
 
 st.divider()
 
