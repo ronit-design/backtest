@@ -61,8 +61,8 @@ def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000):
             entry_i = None
         position[i] = 1 if in_pos else 0
 
-    if in_pos and entry_i is not None:          # open trade at end of data
-        trades.append((entry_i, len(df) - 1))
+    # open trade: do NOT add to trades list (excluded from all trade statistics)
+    open_trade = entry_i if (in_pos and entry_i is not None) else None
 
     pos_series = pd.Series(position, index=df.index)
     price_ret  = df["close"].pct_change().fillna(0)
@@ -79,6 +79,7 @@ def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000):
         "bh_eq":      bh_eq,
         "position":   pos_series,
         "trades":     trades,
+        "open_trade": open_trade,   # entry bar index if position still open, else None
         "buy_sig":    buy_sig,
         "sell_sig":   sell_sig,
     }
@@ -695,6 +696,20 @@ else:
     st.info("Need at least 2 completed trades to run significance tests.")
 
 st.divider()
+
+# ── live position ─────────────────────────────────────────────────────────────
+if res["open_trade"] is not None:
+    oi = res["open_trade"]
+    entry_px  = df_raw["close"].iloc[oi]
+    current_px = df_raw["close"].iloc[-1]
+    unreal_ret = current_px / entry_px - 1
+    bars_open  = len(df_raw) - 1 - oi
+    st.warning(
+        f"⚠️  **Live position detected** — entered {df_raw.index[oi].date()} "
+        f"at {entry_px:.4f}, currently at {current_px:.4f} "
+        f"({unreal_ret:+.2%} unrealised, {bars_open} bars open). "
+        f"This trade is **excluded** from all statistics below."
+    )
 
 # ── trade log ─────────────────────────────────────────────────────────────────
 st.subheader("Trade Log")
