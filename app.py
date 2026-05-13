@@ -212,7 +212,28 @@ if missing:
 df_raw.columns = [c.lower() if c.lower() in {"time","open","high","low","close","volume"} else c
                   for c in df_raw.columns]
 
-df_raw["time"] = pd.to_datetime(df_raw["time"], format="mixed", dayfirst=False)
+def parse_datetime_col(series: pd.Series) -> pd.Series:
+    """Parse datetime column robustly, handling mixed formats and mixed tz-aware/naive rows."""
+    for kwargs in [
+        {"format": "mixed", "dayfirst": False},
+        {"format": "mixed", "dayfirst": False, "utc": True},
+        {"infer_datetime_format": True},
+        {"errors": "coerce"},
+    ]:
+        try:
+            parsed = pd.to_datetime(series, **kwargs)
+            # strip timezone so index is always tz-naive
+            if hasattr(parsed, "dt") and parsed.dt.tz is not None:
+                parsed = parsed.dt.tz_localize(None)
+            elif hasattr(parsed, "tz") and parsed.tz is not None:
+                parsed = parsed.tz_localize(None)
+            return parsed
+        except Exception:
+            continue
+    st.error("Could not parse the 'time' column. Please ensure it contains valid dates or timestamps.")
+    st.stop()
+
+df_raw["time"] = parse_datetime_col(df_raw["time"])
 df_raw = df_raw.sort_values("time").reset_index(drop=True).set_index("time")
 
 with st.expander("Data preview", expanded=False):
