@@ -496,10 +496,10 @@ df_raw["time"] = parse_datetime_col(df_raw["time"])
 df_raw = df_raw.sort_values("time").reset_index(drop=True).set_index("time")
 
 # ── ATH / ATL distance columns (expanding window — no look-ahead) ─────────────
-# % from ATH : always ≤ 0  →  -0.15 means price is 15% below running ATH
-# % from ATL : always ≥ 0  →   0.30 means price is 30% above running ATL
-df_raw["% from ATH"] = df_raw["close"] / df_raw["close"].expanding().max() - 1
-df_raw["% from ATL"] = df_raw["close"] / df_raw["close"].expanding().min() - 1
+# ATH Dist % : always ≤ 0  →  -50 means price is 50% below running ATH
+# ATL Dist % : always ≥ 0  →   30 means price is 30% above running ATL
+df_raw["ATH Dist %"] = (df_raw["close"] / df_raw["close"].expanding().max() - 1) * 100
+df_raw["ATL Dist %"] = (df_raw["close"] / df_raw["close"].expanding().min() - 1) * 100
 
 with st.expander("Data preview", expanded=False):
     st.dataframe(df_raw.tail(20), use_container_width=True)
@@ -509,23 +509,23 @@ with st.expander("📌  ATH / ATL Reference", expanded=False):
     _ath_price   = df_raw["close"].max()
     _atl_price   = df_raw["close"].min()
     _cur_price   = df_raw["close"].iloc[-1]
-    _cur_ath_pct = _cur_price / _ath_price - 1
-    _cur_atl_pct = _cur_price / _atl_price - 1
+    _cur_ath_pct = (_cur_price / _ath_price - 1) * 100
+    _cur_atl_pct = (_cur_price / _atl_price - 1) * 100
     _ath_date    = df_raw["close"].idxmax().date()
     _atl_date    = df_raw["close"].idxmin().date()
 
     ref_c1, ref_c2, ref_c3, ref_c4 = st.columns(4)
-    ref_c1.metric("All-Time High",     f"{_ath_price:.4f}",  f"{_ath_date}")
-    ref_c2.metric("Current vs ATH",    fmt_pct(_cur_ath_pct),
-                  help="% from ATH column value at the last bar")
-    ref_c3.metric("All-Time Low",      f"{_atl_price:.4f}",  f"{_atl_date}")
-    ref_c4.metric("Current vs ATL",    fmt_pct(_cur_atl_pct),
-                  help="% from ATL column value at the last bar")
+    ref_c1.metric("All-Time High",  f"{_ath_price:.4f}", f"{_ath_date}")
+    ref_c2.metric("Current vs ATH", f"{_cur_ath_pct:.1f}%",
+                  help="ATH Dist % value at the last bar")
+    ref_c3.metric("All-Time Low",   f"{_atl_price:.4f}", f"{_atl_date}")
+    ref_c4.metric("Current vs ATL", f"{_cur_atl_pct:.1f}%",
+                  help="ATL Dist % value at the last bar")
 
     st.caption(
-        "**`% from ATH`** is always ≤ 0 (e.g. enter `-0.20` to mean '20% or more below ATH').  "
-        "**`% from ATL`** is always ≥ 0 (e.g. enter `0.10` to mean 'within 10% above ATL').  "
-        "Both columns use an expanding window so each bar only sees history — no look-ahead bias."
+        "**`ATH Dist %`** is always ≤ 0 — enter `-50` to mean '50% or more below ATH'.  "
+        "**`ATL Dist %`** is always ≥ 0 — enter `30` to mean '30% or more above ATL'.  "
+        "Both use an expanding window (bar only sees past data — no look-ahead bias)."
     )
 
 st.divider()
