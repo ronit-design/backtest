@@ -33,24 +33,35 @@ def evaluate_condition(df, col, op, val):
     return pd.Series(False, index=df.index)
 
 
-def build_signal(df, conditions):
+def build_signal(df, conditions, logic="AND"):
+    """
+    logic = "AND"  → all conditions must be true simultaneously
+    logic = "OR"   → any single condition being true is enough
+    """
     if not conditions:
         return pd.Series(False, index=df.index)
-    sig = pd.Series(True, index=df.index)
-    for c in conditions:
-        sig &= evaluate_condition(df, c["col"], c["op"], c["val"])
+    if logic == "OR":
+        sig = pd.Series(False, index=df.index)
+        for c in conditions:
+            sig |= evaluate_condition(df, c["col"], c["op"], c["val"])
+    else:
+        sig = pd.Series(True, index=df.index)
+        for c in conditions:
+            sig &= evaluate_condition(df, c["col"], c["op"], c["val"])
     return sig
 
 
-def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000, take_profit=None):
+def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000, take_profit=None,
+                 buy_logic="AND", sell_logic="AND"):
     """
     take_profit : float | None
         If set (e.g. 0.20 for 20%), exit as soon as the return from
         entry close reaches this threshold, regardless of sell signal.
+    buy_logic / sell_logic : "AND" | "OR"
     trades stored as (entry_bar_idx, exit_bar_idx, exit_reason)
     """
-    buy_sig   = build_signal(df, buy_conds)
-    sell_sig  = build_signal(df, sell_conds)
+    buy_sig   = build_signal(df, buy_conds,  logic=buy_logic)
+    sell_sig  = build_signal(df, sell_conds, logic=sell_logic)
     close_arr = df["close"].values
 
     position  = [0] * len(df)
@@ -247,7 +258,8 @@ def run_monte_carlo(pos_series: pd.Series, price_ret: pd.Series,
 
 def run_walk_forward(df: pd.DataFrame, buy_conds: list, sell_conds: list,
                      n_folds: int, ppy: int, initial_capital: float,
-                     take_profit: float | None = None) -> dict:
+                     take_profit: float | None = None,
+                     buy_logic: str = "AND", sell_logic: str = "AND") -> dict:
     n         = len(df)
     fold_size = n // n_folds
     fold_results, eq_pieces, bh_pieces = [], [], []
@@ -260,7 +272,8 @@ def run_walk_forward(df: pd.DataFrame, buy_conds: list, sell_conds: list,
             continue
 
         fres    = run_backtest(fold_df, buy_conds, sell_conds,
-                              initial_capital=initial_capital, take_profit=take_profit)
+                              initial_capital=initial_capital, take_profit=take_profit,
+                              buy_logic=buy_logic, sell_logic=sell_logic)
         inv_m   = fres["position"].shift(1).fillna(0).astype(bool)
         n_inv   = int(inv_m.sum())
         act_r   = fres["strat_ret"][inv_m]
@@ -458,7 +471,7 @@ df_raw.columns = df_raw.columns.str.strip()
 _file_id = f"{uploaded.name}_{uploaded.size}"
 if st.session_state.get("_file_id") != _file_id:
     for _k in ("res", "wf_result", "mc_result", "buy_conds", "sell_conds",
-               "ppy", "capital", "take_profit"):
+               "buy_logic", "sell_logic", "ppy", "capital", "take_profit"):
         st.session_state.pop(_k, None)
     st.session_state["_file_id"] = _file_id
 
@@ -554,7 +567,14 @@ numeric_cols = df_raw.select_dtypes(include=[np.number]).columns.tolist()
 
 left, right = st.columns(2)
 with left:
-    st.markdown("**Buy conditions** (all must be true)")
+    logic_col, label_col = st.columns([1, 2])
+    buy_logic = logic_col.radio(
+        "Buy logic", ["AND", "OR"], horizontal=True, key="buy_logic",
+        help="AND = all conditions must be true · OR = any one condition is enough"
+    )
+    label_col.markdown(
+        f"**Buy conditions** ({'all' if buy_logic == 'AND' else 'any'} must be true)"
+    )
     n_buy = st.number_input("# buy conditions", 1, 5, 1, key="n_buy")
     buy_conds = []
     for i in range(int(n_buy)):
@@ -562,7 +582,14 @@ with left:
         buy_conds.append(condition_row(f"buy_{i}", numeric_cols))
 
 with right:
-    st.markdown("**Sell conditions** (all must be true)")
+    logic_col2, label_col2 = st.columns([1, 2])
+    sell_logic = logic_col2.radio(
+        "Sell logic", ["AND", "OR"], horizontal=True, key="sell_logic",
+        help="AND = all conditions must be true · OR = any one condition is enough"
+    )
+    label_col2.markdown(
+        f"**Sell conditions** ({'all' if sell_logic == 'AND' else 'any'} must be true)"
+    )
     n_sell = st.number_input("# sell conditions", 1, 5, 1, key="n_sell")
     sell_conds = []
     for i in range(int(n_sell)):
@@ -585,10 +612,13 @@ run = st.button("Run Backtest", type="primary", use_container_width=True)
 if run:
     with st.spinner("Running…"):
         res = run_backtest(df_raw, buy_conds, sell_conds,
-                           initial_capital=capital, take_profit=take_profit)
+                           initial_capital=capital, take_profit=take_profit,
+                           buy_logic=buy_logic, sell_logic=sell_logic)
         st.session_state["res"]          = res
         st.session_state["buy_conds"]    = buy_conds
         st.session_state["sell_conds"]   = sell_conds
+        st.session_state["buy_logic"]    = buy_logic
+        st.session_state["sell_logic"]   = sell_logic
         st.session_state["ppy"]          = ppy
         st.session_state["capital"]      = capital
         st.session_state["take_profit"]  = take_profit
@@ -883,6 +913,8 @@ if st.button("Run Walk-Forward", use_container_width=True):
             st.session_state["ppy"],
             st.session_state["capital"],
             take_profit=st.session_state.get("take_profit"),
+            buy_logic=st.session_state.get("buy_logic", "AND"),
+            sell_logic=st.session_state.get("sell_logic", "AND"),
         )
 
 if "wf_result" in st.session_state:
