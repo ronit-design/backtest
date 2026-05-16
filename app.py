@@ -471,7 +471,7 @@ df_raw.columns = df_raw.columns.str.strip()
 _file_id = f"{uploaded.name}_{uploaded.size}"
 if st.session_state.get("_file_id") != _file_id:
     for _k in ("res", "wf_result", "mc_result", "buy_conds", "sell_conds",
-               "buy_logic", "sell_logic", "ppy", "capital", "take_profit"):
+               "ppy", "capital", "take_profit"):
         st.session_state.pop(_k, None)
     st.session_state["_file_id"] = _file_id
 
@@ -617,8 +617,7 @@ if run:
         st.session_state["res"]          = res
         st.session_state["buy_conds"]    = buy_conds
         st.session_state["sell_conds"]   = sell_conds
-        st.session_state["buy_logic"]    = buy_logic
-        st.session_state["sell_logic"]   = sell_logic
+        # buy_logic / sell_logic are widget-bound keys — Streamlit tracks them automatically
         st.session_state["ppy"]          = ppy
         st.session_state["capital"]      = capital
         st.session_state["take_profit"]  = take_profit
