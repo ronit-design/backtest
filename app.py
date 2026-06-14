@@ -110,12 +110,14 @@ def run_backtest(df, buy_conds, sell_conds, initial_capital=10_000, take_profit=
     }
 
 
-def calc_metrics(ret: pd.Series, equity: pd.Series, ppy: int, n_active: int | None = None) -> dict:
+def calc_metrics(ret: pd.Series, equity: pd.Series, ppy: int,
+                 n_active: int | None = None, rf: float = 0.055) -> dict:
     """
     ret       – return series (pass only active/invested bars for the strategy)
     equity    – full equity curve (for total return and drawdown)
     ppy       – periods per year for the chosen frequency
     n_active  – bars actually invested; if None uses len(ret)
+    rf        – annual risk-free rate (default 5.5%)
     """
     total_ret = equity.iloc[-1] / equity.iloc[0] - 1
     n         = n_active if (n_active and n_active > 0) else len(ret)
@@ -124,7 +126,7 @@ def calc_metrics(ret: pd.Series, equity: pd.Series, ppy: int, n_active: int | No
                 "Ann. Volatility": np.nan, "Sharpe Ratio": np.nan, "Max Drawdown": np.nan}
     ann_ret   = (1 + total_ret) ** (ppy / n) - 1
     ann_vol   = ret.std() * np.sqrt(ppy)
-    sharpe    = ann_ret / ann_vol if ann_vol > 0 else np.nan
+    sharpe    = (ann_ret - rf) / ann_vol if ann_vol > 0 else np.nan
     roll_max  = equity.cummax()
     max_dd    = ((equity - roll_max) / roll_max).min()
     return {
@@ -259,7 +261,8 @@ def run_monte_carlo(pos_series: pd.Series, price_ret: pd.Series,
 def run_walk_forward(df: pd.DataFrame, buy_conds: list, sell_conds: list,
                      n_folds: int, ppy: int, initial_capital: float,
                      take_profit: float | None = None,
-                     buy_logic: str = "AND", sell_logic: str = "AND") -> dict:
+                     buy_logic: str = "AND", sell_logic: str = "AND",
+                     rf: float = 0.055) -> dict:
     n         = len(df)
     fold_size = n // n_folds
     fold_results, eq_pieces, bh_pieces = [], [], []
@@ -277,7 +280,7 @@ def run_walk_forward(df: pd.DataFrame, buy_conds: list, sell_conds: list,
         inv_m   = fres["position"].shift(1).fillna(0).astype(bool)
         n_inv   = int(inv_m.sum())
         act_r   = fres["strat_ret"][inv_m]
-        fm      = calc_metrics(act_r, fres["strat_eq"], ppy, n_active=n_inv)
+        fm      = calc_metrics(act_r, fres["strat_eq"], ppy, n_active=n_inv, rf=rf)
         frec    = build_trade_records(fold_df, fres["trades"], ppy)
 
         if frec:
@@ -546,11 +549,14 @@ st.divider()
 # ── strategy builder ──────────────────────────────────────────────────────────
 st.subheader("Strategy Rules")
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 freq_choice = c1.selectbox("Data frequency", list(FREQ_MAP.keys()), index=3)
 ppy         = FREQ_MAP[freq_choice]
 capital     = c2.number_input("Starting capital ($)", value=10_000, step=1_000)
-fwd_periods = c3.number_input(
+rf          = c3.number_input("Risk-free rate (%)", value=5.5, min_value=0.0,
+                               max_value=20.0, step=0.25,
+                               help="Annual risk-free rate used in Sharpe calculation (e.g. T-bill rate).") / 100
+fwd_periods = c4.number_input(
     "Forward-return window (bars)",
     min_value=1, value=ppy,
     help=f"Periods to look ahead in signal analysis. Default = 1 year ({ppy} bars for {freq_choice})."
@@ -620,6 +626,7 @@ if run:
         # buy_logic / sell_logic are widget-bound keys — Streamlit tracks them automatically
         st.session_state["ppy"]          = ppy
         st.session_state["capital"]      = capital
+        st.session_state["rf"]           = rf
         st.session_state["take_profit"]  = take_profit
         # clear advanced results so stale data doesn't show for a new strategy
         st.session_state.pop("wf_result", None)
@@ -635,8 +642,9 @@ invested_mask = res["position"].shift(1).fillna(0).astype(bool)
 n_invested    = int(invested_mask.sum())
 active_ret    = res["strat_ret"][invested_mask]   # returns only while in position
 
-strat_metrics = calc_metrics(active_ret, res["strat_eq"], ppy, n_active=n_invested)
-bh_metrics    = calc_metrics(res["bh_ret"], res["bh_eq"], ppy)
+rf            = st.session_state.get("rf", 0.055)
+strat_metrics = calc_metrics(active_ret, res["strat_eq"], ppy, n_active=n_invested, rf=rf)
+bh_metrics    = calc_metrics(res["bh_ret"], res["bh_eq"], ppy, rf=rf)
 
 records     = build_trade_records(df_raw, res["trades"], ppy)
 tstats      = trade_stats(records)
@@ -914,6 +922,7 @@ if st.button("Run Walk-Forward", use_container_width=True):
             take_profit=st.session_state.get("take_profit"),
             buy_logic=st.session_state.get("buy_logic", "AND"),
             sell_logic=st.session_state.get("sell_logic", "AND"),
+            rf=st.session_state.get("rf", 0.055),
         )
 
 if "wf_result" in st.session_state:
